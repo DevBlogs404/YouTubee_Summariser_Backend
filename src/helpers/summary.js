@@ -4,7 +4,6 @@ import NodeCache from "node-cache";
 import ytdl from "ytdl-core";
 import fs from "fs";
 import path from "path";
-import { pipeline } from "@xenova/transformers";
 
 const hfToken = process.env.HF_TOKEN;
 
@@ -111,91 +110,57 @@ export const getVideoTranscript = async (videoUrl) => {
 
 export const getVideoSummary = async (transcript) => {
   try {
-    const summary = await pipeline(
-      "summarization",
-      "Xenova/distilbart-cnn-6-6"
-    );
-    const output = await generator(transcript, {
-      max_new_tokens: 100,
-    });
+    if (!transcript || typeof transcript !== "string") {
+      throw new Error("Invalid transcript: must be a non-empty string.");
+    }
 
-    const summaryText = output.summary_text.trim();
+    const chunkSize = 1000;
+    const numChunks = Math.ceil(transcript.length / chunkSize);
+    const chunks = [];
+
+    // Split transcript into chunks
+    for (let i = 0; i < numChunks; i++) {
+      const start = i * chunkSize;
+      const end = Math.min((i + 1) * chunkSize, transcript.length);
+      chunks.push(transcript.slice(start, end));
+    }
+
+    const retryFetch = async (chunk, retries = 3) => {
+      for (let i = 0; i < retries; i++) {
+        try {
+          const result = await hf.summarization({
+            model: "philschmid/bart-large-cnn-samsum",
+            inputs: chunk,
+            parameters: {
+              max_length: 500,
+            },
+          });
+          return result.summary_text;
+        } catch (error) {
+          console.error(
+            `Error summarizing chunk (attempt ${i + 1}):`,
+            error.message
+          );
+          if (i === retries - 1) {
+            return ""; // Return empty string after all retries failed
+          }
+        }
+      }
+    };
+
+    // Process chunks in parallel
+    const promises = chunks.map((chunk) => retryFetch(chunk));
+
+    const summaries = await Promise.all(promises);
+
+    // Concatenate summaries and sanitize text
+    let summaryText = summaries.join(" ").trim();
+    summaryText = summaryText.replace(/&amp;#?\w+;/g, ""); // Remove HTML-encoded entities
+    summaryText = summaryText.replace(/[^\w\s.,!?$',]/g, ""); // Remove unwanted characters except specific punctuation and dollar sign
+
     return summaryText;
   } catch (error) {
-    console.error("Error in getVideoSummary:", error);
+    console.error("Failed to get video summary:", error);
     throw error;
   }
 };
-
-// export const getVideoSummary = async (transcript) => {
-//   try {
-//     const chunkSize = 1000;
-//     const numChunks = Math.ceil(transcript.length / chunkSize);
-//     const chunks = [];
-
-//     // Split transcript into chunks
-//     for (let i = 0; i < numChunks; i++) {
-//       const start = i * chunkSize;
-//       const end = Math.min((i + 1) * chunkSize, transcript.length);
-//       chunks.push(transcript.slice(start, end));
-//     }
-
-//     // const promises = chunks.map(async (chunk) => {
-//     //   return await hf.summarization({
-//     //     model: "philschmid/bart-large-cnn-samsum",
-//     //     // model: "facebook/bart-large-cnn",
-//     //     // model: "sshleifer/distilbart-cnn-12-6",
-//     //     // model: "Falconsai/text_summarization",
-//     //     // model: "google/pegasus-xsum",
-//     //     // model: "zuu/youtube-content-summarization",
-//     //     inputs: chunk,
-//     //     parameters: {
-//     //       min_length: 500,
-//     //     },
-//     //   });
-//     // });
-
-//     // Process chunks in parallel
-//     const promises = chunks.map(async (chunk) => {
-//       try {
-//         const result = await hf.summarization({
-//           model: "philschmid/bart-large-cnn-samsum",
-//           inputs: chunk,
-//           parameters: {
-//             max_length: 500,
-//           },
-//         });
-//         return result.summary_text;
-//       } catch (error) {
-//         console.error("Error summarizing chunk:", error.message);
-//         return ""; // Return empty string for failed chunks
-//       }
-//     });
-
-//     const summaries = await Promise.all(promises);
-
-//     // Concatenate summaries and sanitize text
-//     let summaryText = summaries.join(" ").trim();
-//     summaryText = summaryText.replace(/&amp;#?\w+;/g, ""); // Remove HTML-encoded entities
-//     summaryText = summaryText.replace(/[^\w\s.,!?$',]/g, ""); // Remove unwanted characters except specific punctuation and dollar sign
-
-//     // console.log("summary text:", summaryText);
-
-//     return summaryText;
-
-//     // const summaries = await Promise.all(promises);
-
-//     // // Concatenate summaries
-//     // let summaryText = summaries
-//     //   .map((summary) => summary.summary_text)
-//     //   .join(" ")
-//     //   .trim();
-
-//     // // Regex to remove unwanted characters or patterns
-//     // summaryText = summaryText.replace(/&amp;#?\w+;/g, ""); // Remove HTML-encoded entities
-//     // summaryText = summaryText.replace(/[^\w\s.,!?$']/g, ""); // Remove non-alphanumeric characters except specific punctuation and dollar sign
-//   } catch (error) {
-//     console.log(error);
-//     throw error;
-//   }
-// };
